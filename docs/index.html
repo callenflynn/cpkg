@@ -28,7 +28,16 @@
                 CPKG is a package manager for Windows. It is used to install various apps from your command line.
             </p>
         </section>
-//just a little bit of convincing :)
+
+        <section class="card">
+            <h2>Install CPKG</h2>
+            <p>Grab the latest available <strong>installer.exe</strong> from GitHub releases.</p>
+            <div class="install-row">
+                <button id="install-btn" class="button" type="button">Install CPKG</button>
+                <span id="install-status" class="install-status" aria-live="polite"></span>
+            </div>
+        </section>
+
         <section class="card">
             <h2>What makes us different</h2>
             <p>
@@ -44,6 +53,69 @@
         </footer>
 
     </div>
+              // fallback for finding the latest installer.exe if it isnt in the latest release
+    <script>
+        const OWNER = "callenflynn";
+        const REPO = "cpkg";
+        const FILE = "installer.exe";
+        const RELEASES_PER_PAGE = 30;
+
+        async function findLatestInstallerUrl() {
+            let page = 1;
+
+            while (true) {
+                const url = `https://api.github.com/repos/${OWNER}/${REPO}/releases?per_page=${RELEASES_PER_PAGE}&page=${page}`;
+                const res = await fetch(url);
+
+                if (!res.ok) {
+                    throw new Error(`GitHub API request failed (${res.status})`);
+                }
+
+                const releases = await res.json();
+                if (!Array.isArray(releases) || releases.length === 0) {
+                    return null;
+                }
+
+                for (const release of releases) {
+                    if (release.draft || !Array.isArray(release.assets)) {
+                        continue;
+                    }
+
+                    const match = release.assets.find((asset) => asset.name === FILE);
+                    if (match && match.browser_download_url) {
+                        return match.browser_download_url;
+                    }
+                }
+
+                page += 1;
+            }
+        }
+
+        async function onInstallClick() {
+            const button = document.getElementById("install-btn");
+            const status = document.getElementById("install-status");
+
+            button.disabled = true;
+            status.textContent = "Finding latest installer...";
+
+            try {
+                const installerUrl = await findLatestInstallerUrl();
+                if (!installerUrl) {
+                    status.textContent = "No installer.exe found in any release.";
+                    button.disabled = false;
+                    return;
+                }
+
+                status.textContent = "Installer found. Starting download...";
+                window.location.href = installerUrl;
+            } catch (error) {
+                status.textContent = "Unable to check releases right now. Please try again.";
+                button.disabled = false;
+            }
+        }
+
+        document.getElementById("install-btn").addEventListener("click", onInstallClick);
+    </script>
 
 </body>
 

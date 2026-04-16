@@ -1,6 +1,4 @@
-# cpkg
-my own package manager
-
+<img class="logo" src="assets/cpkg.gif" alt="CPKG logo">
 ## Usage
 Using cpkg is simple. Here are some example commands
 

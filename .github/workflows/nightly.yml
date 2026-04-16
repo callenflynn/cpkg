@@ -1,0 +1,84 @@
+name: Nightly Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-nightly:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build binaries
+        run: cargo build --release --bin cpkg --bin installer
+
+      - name: Compute nightly version
+        id: meta
+        shell: pwsh
+        run: |
+          git fetch --tags --force --prune
+
+          # ----------------------------
+          # 1. Get latest stable tag (vX.Y.Z only)
+          # ----------------------------
+          $latestTag = git tag --list "v*" |
+            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]($_.TrimStart('v')) } -Descending |
+            Select-Object -First 1
+
+          if (-not $latestTag) {
+            $cargoToml = Get-Content Cargo.toml -Raw
+            $match = [regex]::Match($cargoToml, 'version\s*=\s*"(?<ver>\d+\.\d+\.\d+)"')
+
+            if (-not $match.Success) {
+              throw "Could not determine base version from git tags or Cargo.toml"
+            }
+
+            $baseVersion = $match.Groups['ver'].Value
+          }
+          else {
+            $baseVersion = $latestTag.TrimStart('v')
+          }
+
+          Write-Host "Base version: $baseVersion"
+
+          # ----------------------------
+          # 2. Build nightly version
+          # ----------------------------
+          $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+          $short = "${{ github.sha }}".Substring(0, 8)
+
+          $nightlyVersion = "$baseVersion-nightly.$date+g$short"
+
+          Write-Host "Nightly version: $nightlyVersion"
+
+          "tag=$nightlyVersion" >> $env:GITHUB_OUTPUT
+          "name=$nightlyVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release (Nightly)
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          commit: ${{ github.sha }}
+          prerelease: true
+          allowUpdates: false
+          artifacts: target/release/cpkg.exe,target/release/installer.exe
+          token: ${{ secrets.GITHUB_TOKEN }}

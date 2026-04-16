@@ -3,7 +3,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -102,6 +102,21 @@ enum DownloadStatus {
 struct DownloadResult {
 	status: DownloadStatus,
 	file_name: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SelfUpdateChannel {
+	Stable,
+	Nightly,
+}
+
+impl SelfUpdateChannel {
+	fn as_arg(self) -> &'static str {
+		match self {
+			Self::Stable => "stable",
+			Self::Nightly => "nightly",
+		}
+	}
 }
 
 fn main() {
@@ -235,20 +250,24 @@ fn update_apps(
 			return Err("Use either update <app> or update --all, not both".to_string());
 		}
 		update_all_apps(apps_dir, out_dir, state_file)?;
-		return run_self_update();
+		let channel = prompt_self_update_channel()?;
+		return run_self_update(channel);
 	}
 
 	let Some(target) = target else {
-		return Err("Specify an app id, or use --all".to_string());
+		let channel = prompt_self_update_channel()?;
+		return run_self_update(channel);
 	};
 
 	if target.eq_ignore_ascii_case("all") {
 		update_all_apps(apps_dir, out_dir, state_file)?;
-		return run_self_update();
+		let channel = prompt_self_update_channel()?;
+		return run_self_update(channel);
 	}
 
 	if normalize_app_id(target).eq_ignore_ascii_case("cpkg") {
-		return run_self_update();
+		let channel = prompt_self_update_channel()?;
+		return run_self_update(channel);
 	}
 
 	update_one_app(apps_dir, target, out_dir, state_file)
@@ -321,7 +340,7 @@ fn update_all_apps(apps_dir: &Path, out_dir: &Path, state_file: &Path) -> Result
 	}
 }
 
-fn run_self_update() -> Result<(), String> {
+fn run_self_update(channel: SelfUpdateChannel) -> Result<(), String> {
 	let current = std::env::current_exe().map_err(|e| format!("Failed to locate cpkg executable: {e}"))?;
 	let Some(dir) = current.parent() else {
 		return Err("Failed to resolve cpkg executable directory".to_string());
@@ -336,12 +355,41 @@ fn run_self_update() -> Result<(), String> {
 	}
 
 	Command::new(&installer)
+		.arg("--channel")
+		.arg(channel.as_arg())
 		.spawn()
 		.map_err(|e| format!("Failed to launch {}: {e}", installer.display()))?;
 
 	println!("Launched self-updater: {}", installer.display());
+	println!("Update channel: {}", channel.as_arg());
 	println!("Complete the update in the installer window.");
 	Ok(())
+}
+
+fn prompt_self_update_channel() -> Result<SelfUpdateChannel, String> {
+	println!("Check for cpkg updates:");
+	println!("  1) Stable (latest stable release)");
+	println!("  2) Nightly (latest prerelease <stable>-nightly.<date>+g<commit>)");
+
+	loop {
+		print!("Choose update channel [1]: ");
+		io::stdout()
+			.flush()
+			.map_err(|e| format!("Failed to flush stdout: {e}"))?;
+
+		let mut input = String::new();
+		io::stdin()
+			.read_line(&mut input)
+			.map_err(|e| format!("Failed to read update channel choice: {e}"))?;
+
+		match input.trim().to_ascii_lowercase().as_str() {
+			"" | "1" | "stable" => return Ok(SelfUpdateChannel::Stable),
+			"2" | "nightly" => return Ok(SelfUpdateChannel::Nightly),
+			_ => {
+				println!("Invalid choice. Enter 1 for stable or 2 for nightly.");
+			}
+		}
+	}
 }
 
 fn remove_app(app: &str, state_file: &Path) -> Result<(), String> {

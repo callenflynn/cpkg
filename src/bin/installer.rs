@@ -7,7 +7,7 @@ fn main() {
 
 #[cfg(windows)]
 mod win_app {
-    use clap::Parser;
+    use clap::{Parser, ValueEnum};
     use reqwest::blocking::Client;
     use serde_json::Value;
     use std::env;
@@ -36,6 +36,9 @@ mod win_app {
         #[arg(long)]
         debug: bool,
 
+        #[arg(long, value_enum, default_value_t = UpdateChannel::Stable)]
+        channel: UpdateChannel,
+
         #[arg(long, hide = true)]
         elevated: bool,
 
@@ -48,6 +51,21 @@ mod win_app {
     const FILE_NAME: &str = "cpkg.exe";
     const DIRECT_URL: &str = "https://github.com/callenflynn/cpkg/releases/latest/download/cpkg.exe";
     const RELEASES_PER_PAGE: usize = 30;
+
+    #[derive(Copy, Clone, Debug, ValueEnum)]
+    enum UpdateChannel {
+        Stable,
+        Nightly,
+    }
+
+    impl UpdateChannel {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::Stable => "stable",
+                Self::Nightly => "nightly",
+            }
+        }
+    }
 
     pub fn main() {
         let args = Args::parse();
@@ -73,8 +91,9 @@ mod win_app {
         let proceed = ask_yes_no(
             "cpkg Setup",
             &format!(
-                "Install cpkg to the recommended location?\n\n{}\n\nTo update later, run this installer again.",
-                install_dir.display()
+                "Install cpkg to the recommended location?\n\n{}\n\nUpdate channel: {}\n\nTo update later, run this installer again.",
+                install_dir.display(),
+                args.channel.as_str(),
             ),
         );
         if !proceed {
@@ -94,7 +113,7 @@ mod win_app {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-        let download_url = resolve_download_url(&client)?;
+        let download_url = resolve_download_url(&client, args.channel)?;
         let target = install_dir.join(FILE_NAME);
         download_with_progress(&client, &download_url, &target)?;
 
@@ -114,10 +133,13 @@ mod win_app {
         Ok(())
     }
 
-    fn resolve_download_url(client: &Client) -> Result<String, String> {
-        if probe_direct_url(client, DIRECT_URL).is_ok() {
+    fn resolve_download_url(client: &Client, channel: UpdateChannel) -> Result<String, String> {
+        if matches!(channel, UpdateChannel::Stable) && probe_direct_url(client, DIRECT_URL).is_ok() {
             return Ok(DIRECT_URL.to_string());
         }
+
+        let stable_only = matches!(channel, UpdateChannel::Stable);
+        let nightly_only = matches!(channel, UpdateChannel::Nightly);
 
         let mut page = 1usize;
         loop {
@@ -147,6 +169,27 @@ mod win_app {
             }
 
             for release in arr {
+                let prerelease = release
+                    .get("prerelease")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let tag_name = release
+                    .get("tag_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                if stable_only && prerelease {
+                    continue;
+                }
+                if nightly_only
+                    && (!prerelease
+                        || !tag_name
+                            .to_ascii_lowercase()
+                            .contains("-nightly."))
+                {
+                    continue;
+                }
+
                 let Some(assets) = release.get("assets").and_then(|a| a.as_array()) else {
                     continue;
                 };
@@ -171,7 +214,10 @@ mod win_app {
             page += 1;
         }
 
-        Err("Could not find cpkg.exe in GitHub releases.".to_string())
+        Err(format!(
+            "Could not find cpkg.exe in GitHub releases for channel '{}'.",
+            channel.as_str()
+        ))
     }
 
     fn probe_direct_url(client: &Client, url: &str) -> Result<(), String> {
@@ -365,6 +411,8 @@ mod win_app {
         if args.debug {
             params.push("--debug".to_string());
         }
+        params.push("--channel".to_string());
+        params.push(args.channel.as_str().to_string());
         if let Some(dir) = &args.install_dir {
             params.push("--install-dir".to_string());
             params.push(dir.display().to_string());

@@ -1,0 +1,86 @@
+name: Stable Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      - name: Validate version
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Invalid version: $version (use X.Y.Z only, e.g. 1.2.0)"
+          }
+
+          echo "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump Cargo.toml version
+        shell: pwsh
+        run: |
+          $version = $env:VERSION
+
+          (Get-Content Cargo.toml) |
+            ForEach-Object {
+              if ($_ -match '^version\s*=') {
+                "version = `"$version`""
+              } else {
+                $_
+              }
+            } | Set-Content Cargo.toml
+
+
+      - name: Commit version bump
+        shell: pwsh
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add Cargo.toml
+          git commit -m "chore(release): v$env:VERSION" || exit 0
+          git push
+
+
+      - name: Create git tag
+        shell: pwsh
+        run: |
+          git tag v$env:VERSION
+          git push origin v$env:VERSION
+
+
+      - name: Build binaries
+        run: cargo build --release --bin cpkg --bin installer
+
+      
+      - name: Publish stable release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          commit: ${{ github.sha }}
+          prerelease: false
+          allowUpdates: false
+          artifacts: target/release/cpkg.exe,target/release/installer.exe
+          token: ${{ secrets.GITHUB_TOKEN }}

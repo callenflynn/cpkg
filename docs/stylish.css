@@ -26,11 +26,18 @@ body {
 .top-install {
   display: flex;
   justify-content: center;
-  margin-bottom: 18px;
+  margin-top: 10px;
 }
 
 .hero {
   margin-bottom: 16px;
+}
+
+.logo {
+  display: block;
+  width: min(220px, 60vw);
+  height: auto;
+  margin: 0 auto 8px;
 }
 
 h1, h2, h3 {

@@ -11,10 +11,6 @@
 
     <div class="container">
 
-        <div class="top-install">
-            <button id="install-btn" class="button" type="button">Install CPKG</button>
-        </div>
-
         <nav class="tabs" aria-label="Site navigation">
             <a class="tab active" href="index.html" aria-current="page">Home</a>
             <a class="tab" href="https://github.com/callenflynn/cpkg/wiki" target="_blank" rel="noopener noreferrer">Wiki</a>
@@ -22,8 +18,12 @@
         </nav>
 
         <header class="hero">
+            <img class="logo" src="assets/cpkg.gif" alt="CPKG logo">
             <h1>CPKG</h1>
             <p class="subtitle">Windows packages done differently</p>
+            <div class="top-install">
+                <button id="install-btn" class="button" type="button">Install CPKG</button>
+            </div>
         </header>
 
         <section class="card">
@@ -48,7 +48,7 @@
         </footer>
 
     </div>
-              // fallback for finding the latest installer.exe if it isnt in the latest release
+              <!-- fallback for finding the latest installer.exe if it isnt in the latest release -->
     <script>
         const OWNER = "callenflynn";
         const REPO = "cpkg";

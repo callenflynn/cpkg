@@ -1,4 +1,4 @@
-<img class="logo" src="assets/cpkg.gif" alt="CPKG logo">
+<img class="logo" src="docs/assets/cpkg.gif" alt="CPKG logo">
 ## Usage
 Using cpkg is simple. Here are some example commands
 

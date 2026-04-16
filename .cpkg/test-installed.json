@@ -1,0 +1,22 @@
+{
+  "apps": [
+    {
+      "app_id": "brave-browser.brave",
+      "name": "Brave Browser",
+      "repo": "https://github.com/brave/brave-browser",
+      "description": "Brave Browser is a lightning fast, safe and private web browser that prevents you from being tracked and blocks ads by default.",
+      "download": "https://github.com/brave/brave-browser/releases/latest/download/BraveBrowserStandaloneSilentNightlySetup.exe",
+      "installed_file": ".cpkg/test-downloads\\BraveBrowserSetup.exe",
+      "installed_at_unix": 1776371307
+    },
+    {
+      "app_id": "ztarry.callenflynn",
+      "name": "Ztarry",
+      "repo": "https://github.com/callenflynn/Ztarry",
+      "description": "Ztarry is a terminal-based Windows resource monitor",
+      "download": "https://github.com/callenflynn/Ztarry/releases/latest/download/installer.exe",
+      "installed_file": ".cpkg/test-downloads\\Ztarry-windows-x64.zip",
+      "installed_at_unix": 1776371306
+    }
+  ]
+}

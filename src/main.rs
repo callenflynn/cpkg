@@ -1,11 +1,16 @@
 use clap::{Parser, Subcommand};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const APPS_REPO_OWNER: &str = "callenflynn";
+const APPS_REPO_NAME: &str = "cpkg";
+const APPS_REPO_BRANCH: &str = "main";
 
 #[derive(Parser, Debug)]
 #[command(name = "cpkg", version, about = "Minimal GitHub release installer")]
@@ -93,6 +98,12 @@ enum DownloadStatus {
 	Downloaded,
 }
 
+#[derive(Debug)]
+struct DownloadResult {
+	status: DownloadStatus,
+	file_name: String,
+}
+
 fn main() {
 	if let Err(err) = run() {
 		eprintln!("error: {err}");
@@ -143,11 +154,11 @@ fn list_installed_apps(state_file: &Path) -> Result<(), String> {
 }
 
 fn show_app(apps_dir: &Path, app: &str) -> Result<(), String> {
-	let path = app_manifest_path(apps_dir, app);
-	let manifest = read_manifest(&path)?;
+	let app_id = normalize_app_id(app);
+	let manifest = load_manifest(apps_dir, &app_id)?;
 	validate_manifest(&manifest)?;
 
-	println!("id: {app}");
+	println!("id: {app_id}");
 	println!("name: {}", manifest.name);
 	println!("repo: {}", manifest.repo);
 	println!("description: {}", manifest.description);
@@ -158,25 +169,18 @@ fn show_app(apps_dir: &Path, app: &str) -> Result<(), String> {
 fn validate_apps(apps_dir: &Path, app: Option<&str>) -> Result<(), String> {
 	match app {
 		Some(app_id) => {
-			let path = app_manifest_path(apps_dir, app_id);
-			let manifest = read_manifest(&path)?;
+			let app_id = normalize_app_id(app_id);
+			let manifest = load_manifest(apps_dir, &app_id)?;
 			validate_manifest(&manifest)?;
 			println!("OK: {app_id}");
 			Ok(())
 		}
 		None => {
-			let files = manifest_files(apps_dir)?;
-			if files.is_empty() {
-				return Err(format!("No JSON files found in {}", apps_dir.display()));
-			}
+			let app_ids = list_manifest_ids(apps_dir)?;
 
 			let mut failed = 0usize;
-			for file in files {
-				let app_id = file
-					.file_stem()
-					.and_then(|s| s.to_str())
-					.unwrap_or("<invalid-name>");
-				let result = read_manifest(&file).and_then(|m| validate_manifest(&m));
+			for app_id in app_ids {
+				let result = load_manifest(apps_dir, &app_id).and_then(|m| validate_manifest(&m));
 
 				match result {
 					Ok(()) => println!("OK: {app_id}"),
@@ -199,16 +203,15 @@ fn validate_apps(apps_dir: &Path, app: Option<&str>) -> Result<(), String> {
 
 fn install_app(apps_dir: &Path, app: &str, out_dir: &Path, state_file: &Path) -> Result<(), String> {
 	let app_id = normalize_app_id(app);
-	let path = app_manifest_path(apps_dir, &app_id);
-	let manifest = read_manifest(&path)?;
+	let manifest = load_manifest(apps_dir, &app_id)?;
 	validate_manifest(&manifest)?;
 	let mut state = read_installed_state(state_file)?;
 
-	let status = download_manifest_installer(&manifest, out_dir)?;
-	upsert_installed(&mut state, &app_id, &manifest, out_dir)?;
+	let result = download_manifest_installer(&manifest, out_dir)?;
+	upsert_installed(&mut state, &app_id, &manifest, out_dir, &result.file_name)?;
 	write_installed_state(state_file, &state)?;
 
-	match status {
+	match result.status {
 		DownloadStatus::UpToDate => {
 			println!("{app_id} is already up to date.");
 		}
@@ -259,14 +262,14 @@ fn update_one_app(apps_dir: &Path, app: &str, out_dir: &Path, state_file: &Path)
 		return Err(format!("{app_id} is not installed"));
 	}
 
-	let manifest = read_manifest(&app_manifest_path(apps_dir, &app_id))?;
+	let manifest = load_manifest(apps_dir, &app_id)?;
 	validate_manifest(&manifest)?;
 
-	let status = download_manifest_installer(&manifest, out_dir)?;
-	upsert_installed(&mut state, &app_id, &manifest, out_dir)?;
+	let result = download_manifest_installer(&manifest, out_dir)?;
+	upsert_installed(&mut state, &app_id, &manifest, out_dir, &result.file_name)?;
 	write_installed_state(state_file, &state)?;
 
-	match status {
+	match result.status {
 		DownloadStatus::UpToDate => println!("{app_id} is already up to date."),
 		DownloadStatus::Downloaded => println!("Updated {app_id}."),
 	}
@@ -290,12 +293,12 @@ fn update_all_apps(apps_dir: &Path, out_dir: &Path, state_file: &Path) -> Result
 	let mut failures = 0usize;
 
 	for app_id in app_ids {
-		let result = read_manifest(&app_manifest_path(apps_dir, &app_id))
+		let result = load_manifest(apps_dir, &app_id)
 			.and_then(|m| {
 				validate_manifest(&m)?;
-				let status = download_manifest_installer(&m, out_dir)?;
-				upsert_installed(&mut state, &app_id, &m, out_dir)?;
-				Ok(status)
+				let result = download_manifest_installer(&m, out_dir)?;
+				upsert_installed(&mut state, &app_id, &m, out_dir, &result.file_name)?;
+				Ok(result.status)
 			});
 
 		match result {
@@ -364,15 +367,16 @@ fn remove_app(app: &str, state_file: &Path) -> Result<(), String> {
 	Ok(())
 }
 
-fn download_manifest_installer(manifest: &AppManifest, out_dir: &Path) -> Result<DownloadStatus, String> {
+fn download_manifest_installer(manifest: &AppManifest, out_dir: &Path) -> Result<DownloadResult, String> {
 	fs::create_dir_all(out_dir)
 		.map_err(|e| format!("Failed to create {}: {e}", out_dir.display()))?;
 
-	let file_name = file_name_from_download_url(&manifest.download)?;
+	let (bytes, resolved_url) = download_bytes(&manifest.download)?;
+	let file_name = file_name_from_download_url(&resolved_url)?;
 	let target_path = out_dir.join(file_name);
-	println!("Downloading {}...", manifest.download);
-
-	let bytes = download_bytes(&manifest.download)?;
+	if resolved_url != manifest.download {
+		println!("Resolved download to {resolved_url}");
+	}
 	let is_unchanged = if target_path.exists() {
 		match fs::read(&target_path) {
 			Ok(existing) => existing == bytes,
@@ -383,7 +387,14 @@ fn download_manifest_installer(manifest: &AppManifest, out_dir: &Path) -> Result
 	};
 
 	if is_unchanged {
-		return Ok(DownloadStatus::UpToDate);
+		return Ok(DownloadResult {
+			status: DownloadStatus::UpToDate,
+			file_name: target_path
+				.file_name()
+				.and_then(|n| n.to_str())
+				.unwrap_or_default()
+				.to_string(),
+		});
 	}
 
 	let mut file = fs::File::create(&target_path)
@@ -392,26 +403,56 @@ fn download_manifest_installer(manifest: &AppManifest, out_dir: &Path) -> Result
 		.map_err(|e| format!("Failed writing {}: {e}", target_path.display()))?;
 
 	println!("Saved installer to {}", target_path.display());
-	Ok(DownloadStatus::Downloaded)
+	Ok(DownloadResult {
+		status: DownloadStatus::Downloaded,
+		file_name: target_path
+			.file_name()
+			.and_then(|n| n.to_str())
+			.unwrap_or_default()
+			.to_string(),
+	})
 }
 
-fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
-	let client = Client::builder()
-		.user_agent("cpkg/0.1")
-		.build()
-		.map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+fn download_bytes(url: &str) -> Result<(Vec<u8>, String), String> {
+	let client = github_client()?;
+	println!("Downloading {url}...");
 
 	let response = client
 		.get(url)
 		.send()
-		.map_err(|e| format!("Request failed: {e}"))?
-		.error_for_status()
-		.map_err(|e| format!("Download failed: {e}"))?;
+		.map_err(|e| format!("Request failed: {e}"))?;
 
-	response
-		.bytes()
-		.map(|b| b.to_vec())
-		.map_err(|e| format!("Failed reading response bytes: {e}"))
+	if response.status().is_success() {
+		let bytes = response
+			.bytes()
+			.map(|b| b.to_vec())
+			.map_err(|e| format!("Failed reading response bytes: {e}"))?;
+		return Ok((bytes, url.to_string()));
+	}
+
+	if response.status().as_u16() == 404 {
+		if let Some(fallback_url) = resolve_github_latest_download_fallback(url)? {
+			println!("Primary URL returned 404, trying release asset fallback...");
+			let fallback_response = client
+				.get(&fallback_url)
+				.send()
+				.map_err(|e| format!("Fallback request failed: {e}"))?
+				.error_for_status()
+				.map_err(|e| format!("Fallback download failed: {e}"))?;
+
+			let bytes = fallback_response
+				.bytes()
+				.map(|b| b.to_vec())
+				.map_err(|e| format!("Failed reading fallback response bytes: {e}"))?;
+
+			return Ok((bytes, fallback_url));
+		}
+	}
+
+	Err(format!(
+		"Download failed: HTTP status {} for url ({url})",
+		response.status()
+	))
 }
 
 fn upsert_installed(
@@ -419,9 +460,9 @@ fn upsert_installed(
 	app_id: &str,
 	manifest: &AppManifest,
 	out_dir: &Path,
+	installed_file_name: &str,
 ) -> Result<(), String> {
-	let file_name = file_name_from_download_url(&manifest.download)?;
-	let installed_path = out_dir.join(file_name);
+	let installed_path = out_dir.join(installed_file_name);
 	let now = now_unix_seconds()?;
 
 	let record = InstalledApp {
@@ -482,6 +523,117 @@ fn app_manifest_path(apps_dir: &Path, app: &str) -> PathBuf {
 	apps_dir.join(format!("{app}.json"))
 }
 
+fn load_manifest(apps_dir: &Path, app_id: &str) -> Result<AppManifest, String> {
+	let local_path = app_manifest_path(apps_dir, app_id);
+	if local_path.exists() {
+		return read_manifest(&local_path);
+	}
+
+	fetch_remote_manifest(app_id)
+}
+
+fn list_manifest_ids(apps_dir: &Path) -> Result<Vec<String>, String> {
+	if apps_dir.exists() {
+		let files = manifest_files(apps_dir)?;
+		if !files.is_empty() {
+			let mut ids = Vec::new();
+			for file in files {
+				if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
+					ids.push(stem.to_string());
+				}
+			}
+			ids.sort();
+			return Ok(ids);
+		}
+	}
+
+	fetch_remote_app_ids()
+}
+
+fn github_client() -> Result<Client, String> {
+	Client::builder()
+		.user_agent("cpkg/0.1")
+		.build()
+		.map_err(|e| format!("Failed to create HTTP client: {e}"))
+}
+
+fn fetch_remote_app_ids() -> Result<Vec<String>, String> {
+	let client = github_client()?;
+	let url = format!(
+		"https://api.github.com/repos/{}/{}/contents/apps?ref={}",
+		APPS_REPO_OWNER, APPS_REPO_NAME, APPS_REPO_BRANCH
+	);
+
+	let response = client
+		.get(&url)
+		.send()
+		.map_err(|e| format!("Failed to query remote app index: {e}"))?
+		.error_for_status()
+		.map_err(|e| format!("Remote app index request failed: {e}"))?;
+	let raw = response
+		.text()
+		.map_err(|e| format!("Failed reading remote app index body: {e}"))?;
+
+	let listing: Value = serde_json::from_str(&raw)
+		.map_err(|e| format!("Failed to parse remote app index: {e}"))?;
+
+	let entries = listing
+		.as_array()
+		.ok_or_else(|| "Remote app index did not return an array".to_string())?;
+
+	let mut ids: Vec<String> = entries
+		.iter()
+		.filter_map(|entry| {
+			let ty = entry.get("type")?.as_str()?;
+			if ty != "file" {
+				return None;
+			}
+			let name = entry.get("name")?.as_str()?;
+			if !name.ends_with(".json") {
+				return None;
+			}
+			Some(name.trim_end_matches(".json").to_string())
+		})
+		.collect();
+
+	ids.sort();
+
+	if ids.is_empty() {
+		return Err("No app manifests found in remote apps directory".to_string());
+	}
+
+	Ok(ids)
+}
+
+fn fetch_remote_manifest(app_id: &str) -> Result<AppManifest, String> {
+	let requested = normalize_app_id(app_id);
+	let remote_ids = fetch_remote_app_ids()?;
+
+	let resolved_id = remote_ids
+		.into_iter()
+		.find(|id| id.eq_ignore_ascii_case(&requested))
+		.ok_or_else(|| format!("App manifest not found locally or remotely: {requested}"))?;
+
+	let url = format!(
+		"https://raw.githubusercontent.com/{}/{}/{}/apps/{}.json",
+		APPS_REPO_OWNER, APPS_REPO_NAME, APPS_REPO_BRANCH, resolved_id
+	);
+
+	let client = github_client()?;
+	let response = client
+		.get(&url)
+		.send()
+		.map_err(|e| format!("Failed to fetch remote manifest {resolved_id}.json: {e}"))?
+		.error_for_status()
+		.map_err(|e| format!("Remote manifest request failed for {resolved_id}.json: {e}"))?;
+	let raw = response
+		.text()
+		.map_err(|e| format!("Failed reading remote manifest body for {resolved_id}.json: {e}"))?;
+
+	serde_json::from_str::<AppManifest>(&raw)
+		.map_err(|e| format!("Invalid remote manifest JSON for {resolved_id}.json: {e}"))
+}
+
 fn manifest_files(apps_dir: &Path) -> Result<Vec<PathBuf>, String> {
 	let entries = fs::read_dir(apps_dir)
 		.map_err(|e| format!("Failed reading {}: {e}", apps_dir.display()))?;
@@ -540,4 +692,126 @@ fn file_name_from_download_url(url: &str) -> Result<String, String> {
 	}
 
 	Ok(name.to_string())
+}
+
+fn resolve_github_latest_download_fallback(url: &str) -> Result<Option<String>, String> {
+	let Some((owner, repo, requested_file)) = parse_github_latest_download_url(url) else {
+		return Ok(None);
+	};
+
+	let client = github_client()?;
+	if let Some(value) = fetch_release_json(&client, &owner, &repo, true)? {
+		if let Some(asset_url) = select_asset_download_url(&value, &requested_file) {
+			return Ok(Some(asset_url));
+		}
+	}
+
+	if let Some(value) = fetch_release_json(&client, &owner, &repo, false)? {
+		if let Some(asset_url) = select_asset_download_url(&value, &requested_file) {
+			return Ok(Some(asset_url));
+		}
+	}
+
+	Ok(None)
+}
+
+fn parse_github_latest_download_url(url: &str) -> Option<(String, String, String)> {
+	let prefix = "https://github.com/";
+	let path = url.strip_prefix(prefix)?;
+	let parts: Vec<&str> = path.split('/').collect();
+	if parts.len() < 6 {
+		return None;
+	}
+	if parts[2] != "releases" || parts[3] != "latest" || parts[4] != "download" {
+		return None;
+	}
+
+	Some((
+		parts[0].to_string(),
+		parts[1].to_string(),
+		parts[5].to_string(),
+	))
+}
+
+fn fetch_release_json(
+	client: &Client,
+	owner: &str,
+	repo: &str,
+	stable_latest_only: bool,
+) -> Result<Option<Value>, String> {
+	let url = if stable_latest_only {
+		format!("https://api.github.com/repos/{owner}/{repo}/releases/latest")
+	} else {
+		format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=1")
+	};
+
+	let response = client
+		.get(&url)
+		.send()
+		.map_err(|e| format!("Failed querying release metadata: {e}"))?;
+
+	if response.status().as_u16() == 404 {
+		return Ok(None);
+	}
+
+	let response = response
+		.error_for_status()
+		.map_err(|e| format!("Release metadata request failed: {e}"))?;
+	let raw = response
+		.text()
+		.map_err(|e| format!("Failed reading release metadata body: {e}"))?;
+
+	if stable_latest_only {
+		let value = serde_json::from_str::<Value>(&raw)
+			.map_err(|e| format!("Failed parsing latest release metadata: {e}"))?;
+		Ok(Some(value))
+	} else {
+		let releases = serde_json::from_str::<Value>(&raw)
+			.map_err(|e| format!("Failed parsing releases metadata: {e}"))?;
+		let release = releases
+			.as_array()
+			.and_then(|arr| arr.first())
+			.cloned();
+		Ok(release)
+	}
+}
+
+fn select_asset_download_url(release: &Value, requested_file: &str) -> Option<String> {
+	let assets = release.get("assets")?.as_array()?;
+
+	if let Some(exact) = assets.iter().find_map(|asset| {
+		let name = asset.get("name")?.as_str()?;
+		if name.eq_ignore_ascii_case(requested_file) {
+			return asset
+				.get("browser_download_url")
+				.and_then(|u| u.as_str())
+				.map(|u| u.to_string());
+		}
+		None
+	}) {
+		return Some(exact);
+	}
+
+	let preferred_exts = [".exe", ".msi", ".zip"];
+	for ext in preferred_exts {
+		if let Some(url) = assets.iter().find_map(|asset| {
+			let name = asset.get("name")?.as_str()?;
+			if name.to_ascii_lowercase().ends_with(ext) {
+				return asset
+					.get("browser_download_url")
+					.and_then(|u| u.as_str())
+					.map(|u| u.to_string());
+			}
+			None
+		}) {
+			return Some(url);
+		}
+	}
+
+	assets.iter().find_map(|asset| {
+		asset
+			.get("browser_download_url")
+			.and_then(|u| u.as_str())
+			.map(|u| u.to_string())
+	})
 }

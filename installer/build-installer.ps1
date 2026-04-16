@@ -13,7 +13,6 @@ if (Test-Path $stageDir) {
 New-Item -Path $stageDir -ItemType Directory | Out-Null
 
 Copy-Item -Path (Join-Path $scriptRoot "install-cpkg.ps1") -Destination (Join-Path $stageDir "install-cpkg.ps1") -Force
-Copy-Item -Path (Join-Path $scriptRoot "run-installer.cmd") -Destination (Join-Path $stageDir "run-installer.cmd") -Force
 
 $stageDirEscaped = $stageDir -replace "\\", "\\\\"
 $outputExeEscaped = $outputExe -replace "\\", "\\\\"
@@ -37,22 +36,20 @@ DisplayLicense=
 FinishMessage=CPKG installer finished.
 TargetName=$outputExeEscaped
 FriendlyName=CPKG Installer
-AppLaunched=cmd /c run-installer.cmd
+AppLaunched=powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File install-cpkg.ps1
 PostInstallCmd=<None>
-AdminQuietInstCmd=cmd /c run-installer.cmd
-UserQuietInstCmd=cmd /c run-installer.cmd
+AdminQuietInstCmd=powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File install-cpkg.ps1
+UserQuietInstCmd=powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File install-cpkg.ps1
 SourceFiles=SourceFiles
 
 [Strings]
-FILE0="run-installer.cmd"
-FILE1="install-cpkg.ps1"
+FILE0="install-cpkg.ps1"
 
 [SourceFiles]
 SourceFiles0=$stageDirEscaped
 
 [SourceFiles0]
 %FILE0%=
-%FILE1%=
 "@
 
 Set-Content -Path $sedPath -Value $sedContent -Encoding ASCII

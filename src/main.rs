@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
@@ -44,7 +45,9 @@ enum Commands {
 	},
 	/// Update an installed app, or all installed apps
 	Update {
-		target: String,
+		target: Option<String>,
+		#[arg(long)]
+		all: bool,
 		#[arg(long, default_value = "apps")]
 		apps_dir: PathBuf,
 		#[arg(long, default_value = ".cpkg/downloads")]
@@ -112,10 +115,11 @@ fn run() -> Result<(), String> {
 		} => install_app(&apps_dir, &app, &out_dir, &state_file),
 		Commands::Update {
 			target,
+			all,
 			apps_dir,
 			out_dir,
 			state_file,
-		} => update_apps(&apps_dir, &target, &out_dir, &state_file),
+		} => update_apps(&apps_dir, target.as_deref(), all, &out_dir, &state_file),
 		Commands::Remove { app, state_file } => remove_app(&app, &state_file),
 	}
 }
@@ -216,12 +220,35 @@ fn install_app(apps_dir: &Path, app: &str, out_dir: &Path, state_file: &Path) ->
 	Ok(())
 }
 
-fn update_apps(apps_dir: &Path, target: &str, out_dir: &Path, state_file: &Path) -> Result<(), String> {
-	if target.eq_ignore_ascii_case("all") {
-		update_all_apps(apps_dir, out_dir, state_file)
-	} else {
-		update_one_app(apps_dir, target, out_dir, state_file)
+fn update_apps(
+	apps_dir: &Path,
+	target: Option<&str>,
+	all_flag: bool,
+	out_dir: &Path,
+	state_file: &Path,
+) -> Result<(), String> {
+	if all_flag {
+		if target.is_some() {
+			return Err("Use either update <app> or update --all, not both".to_string());
+		}
+		update_all_apps(apps_dir, out_dir, state_file)?;
+		return run_self_update();
 	}
+
+	let Some(target) = target else {
+		return Err("Specify an app id, or use --all".to_string());
+	};
+
+	if target.eq_ignore_ascii_case("all") {
+		update_all_apps(apps_dir, out_dir, state_file)?;
+		return run_self_update();
+	}
+
+	if normalize_app_id(target).eq_ignore_ascii_case("cpkg") {
+		return run_self_update();
+	}
+
+	update_one_app(apps_dir, target, out_dir, state_file)
 }
 
 fn update_one_app(apps_dir: &Path, app: &str, out_dir: &Path, state_file: &Path) -> Result<(), String> {
@@ -254,7 +281,12 @@ fn update_all_apps(apps_dir: &Path, out_dir: &Path, state_file: &Path) -> Result
 		return Ok(());
 	}
 
-	let app_ids: Vec<String> = state.apps.iter().map(|a| a.app_id.clone()).collect();
+	let app_ids: Vec<String> = state
+		.apps
+		.iter()
+		.filter(|a| !a.app_id.eq_ignore_ascii_case("cpkg"))
+		.map(|a| a.app_id.clone())
+		.collect();
 	let mut failures = 0usize;
 
 	for app_id in app_ids {
@@ -281,9 +313,32 @@ fn update_all_apps(apps_dir: &Path, out_dir: &Path, state_file: &Path) -> Result
 	if failures > 0 {
 		Err(format!("Update failed for {failures} app(s)"))
 	} else {
-		println!("All installed apps are up to date.");
+		println!("All installed apps are up to date (excluding cpkg self-update).\n");
 		Ok(())
 	}
+}
+
+fn run_self_update() -> Result<(), String> {
+	let current = std::env::current_exe().map_err(|e| format!("Failed to locate cpkg executable: {e}"))?;
+	let Some(dir) = current.parent() else {
+		return Err("Failed to resolve cpkg executable directory".to_string());
+	};
+
+	let installer = dir.join("installer.exe");
+	if !installer.exists() {
+		return Err(format!(
+			"Self-update requires installer.exe in {}",
+			dir.display()
+		));
+	}
+
+	Command::new(&installer)
+		.spawn()
+		.map_err(|e| format!("Failed to launch {}: {e}", installer.display()))?;
+
+	println!("Launched self-updater: {}", installer.display());
+	println!("Complete the update in the installer window.");
+	Ok(())
 }
 
 fn remove_app(app: &str, state_file: &Path) -> Result<(), String> {

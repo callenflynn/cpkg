@@ -23,6 +23,12 @@ body {
   margin: 28px auto;
 }
 
+.top-install {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+
 .hero {
   margin-bottom: 16px;
 }
@@ -94,18 +100,6 @@ p {
 
 .button:hover {
   opacity: 0.9;
-}
-
-.install-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.install-status {
-  color: var(--muted);
-  font-size: 0.95rem;
 }
 
 .subtitle {

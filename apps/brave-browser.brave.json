@@ -1,0 +1,6 @@
+{
+  "name": "Brave Browser",
+  "repo": "https://github.com/brave/brave-browser",
+  "description": "Brave Browser is a lightning fast, safe and private web browser that prevents you from being tracked and blocks ads by default.",
+  "download": "https://github.com/brave/brave-browser/releases/latest/download/BraveBrowserStandaloneSilentNightlySetup.exe"
+}

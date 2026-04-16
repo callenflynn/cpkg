@@ -1,0 +1,9 @@
+This project uses the following dependencies:
+
+- reqwest (MIT OR Apache-2.0)
+- tokio (MIT)
+- hyper (MIT OR Apache-2.0)
+- rustls (MIT OR Apache-2.0)
+- webpki-roots (MPL-2.0)
+
+Full license texts can be found in their respective crates at https://crates.io

@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
 #[command(name = "cpkg", version, about = "Minimal GitHub release installer")]
@@ -14,10 +15,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-	/// List all app manifests in registry
+	/// List all installed apps
 	List {
-		#[arg(long, default_value = "apps")]
-		apps_dir: PathBuf,
+		#[arg(long, default_value = ".cpkg/installed.json")]
+		state_file: PathBuf,
 	},
 	/// Show app details
 	Show {
@@ -38,6 +39,24 @@ enum Commands {
 		apps_dir: PathBuf,
 		#[arg(long, default_value = ".cpkg/downloads")]
 		out_dir: PathBuf,
+		#[arg(long, default_value = ".cpkg/installed.json")]
+		state_file: PathBuf,
+	},
+	/// Update an installed app, or all installed apps
+	Update {
+		target: String,
+		#[arg(long, default_value = "apps")]
+		apps_dir: PathBuf,
+		#[arg(long, default_value = ".cpkg/downloads")]
+		out_dir: PathBuf,
+		#[arg(long, default_value = ".cpkg/installed.json")]
+		state_file: PathBuf,
+	},
+	/// Remove an installed app
+	Remove {
+		app: String,
+		#[arg(long, default_value = ".cpkg/installed.json")]
+		state_file: PathBuf,
 	},
 }
 
@@ -47,6 +66,28 @@ struct AppManifest {
 	repo: String,
 	description: String,
 	download: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstalledApp {
+	app_id: String,
+	name: String,
+	repo: String,
+	description: String,
+	download: String,
+	installed_file: String,
+	installed_at_unix: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct InstalledState {
+	apps: Vec<InstalledApp>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DownloadStatus {
+	UpToDate,
+	Downloaded,
 }
 
 fn main() {
@@ -60,40 +101,39 @@ fn run() -> Result<(), String> {
 	let cli = Cli::parse();
 
 	match cli.command {
-		Commands::List { apps_dir } => list_apps(&apps_dir),
+		Commands::List { state_file } => list_installed_apps(&state_file),
 		Commands::Show { app, apps_dir } => show_app(&apps_dir, &app),
 		Commands::Validate { app, apps_dir } => validate_apps(&apps_dir, app.as_deref()),
 		Commands::Install {
 			app,
 			apps_dir,
 			out_dir,
-		} => install_app(&apps_dir, &app, &out_dir),
+			state_file,
+		} => install_app(&apps_dir, &app, &out_dir, &state_file),
+		Commands::Update {
+			target,
+			apps_dir,
+			out_dir,
+			state_file,
+		} => update_apps(&apps_dir, &target, &out_dir, &state_file),
+		Commands::Remove { app, state_file } => remove_app(&app, &state_file),
 	}
 }
 
-fn list_apps(apps_dir: &Path) -> Result<(), String> {
-	let files = manifest_files(apps_dir)?;
-	if files.is_empty() {
-		println!("No app manifests found in {}", apps_dir.display());
+fn list_installed_apps(state_file: &Path) -> Result<(), String> {
+	let state = read_installed_state(state_file)?;
+	if state.apps.is_empty() {
+		println!("No apps installed yet.");
 		return Ok(());
 	}
 
-	println!("Found {} app(s):", files.len());
-	for file in files {
-		let app_id = file
-			.file_stem()
-			.and_then(|s| s.to_str())
-			.ok_or_else(|| format!("Invalid file name: {}", file.display()))?;
-
-		match read_manifest(&file) {
-			Ok(manifest) => {
-				println!("- {app_id}: {}", manifest.name);
-			}
-			Err(err) => {
-				println!("- {app_id}: invalid manifest ({err})");
-			}
+	println!("Installed app(s): {}", state.apps.len());
+	for app in state.apps {
+		println!(
+			"- {}: {} ({})",
+			app.app_id, app.name, app.installed_file
+		);
 		}
-	}
 
 	Ok(())
 }
@@ -153,11 +193,123 @@ fn validate_apps(apps_dir: &Path, app: Option<&str>) -> Result<(), String> {
 	}
 }
 
-fn install_app(apps_dir: &Path, app: &str, out_dir: &Path) -> Result<(), String> {
-	let path = app_manifest_path(apps_dir, app);
+fn install_app(apps_dir: &Path, app: &str, out_dir: &Path, state_file: &Path) -> Result<(), String> {
+	let app_id = normalize_app_id(app);
+	let path = app_manifest_path(apps_dir, &app_id);
 	let manifest = read_manifest(&path)?;
 	validate_manifest(&manifest)?;
+	let mut state = read_installed_state(state_file)?;
 
+	let status = download_manifest_installer(&manifest, out_dir)?;
+	upsert_installed(&mut state, &app_id, &manifest, out_dir)?;
+	write_installed_state(state_file, &state)?;
+
+	match status {
+		DownloadStatus::UpToDate => {
+			println!("{app_id} is already up to date.");
+		}
+		DownloadStatus::Downloaded => {
+			println!("Installed {app_id}.");
+		}
+	}
+
+	Ok(())
+}
+
+fn update_apps(apps_dir: &Path, target: &str, out_dir: &Path, state_file: &Path) -> Result<(), String> {
+	if target.eq_ignore_ascii_case("all") {
+		update_all_apps(apps_dir, out_dir, state_file)
+	} else {
+		update_one_app(apps_dir, target, out_dir, state_file)
+	}
+}
+
+fn update_one_app(apps_dir: &Path, app: &str, out_dir: &Path, state_file: &Path) -> Result<(), String> {
+	let app_id = normalize_app_id(app);
+	let mut state = read_installed_state(state_file)?;
+
+	if !state.apps.iter().any(|a| a.app_id == app_id) {
+		return Err(format!("{app_id} is not installed"));
+	}
+
+	let manifest = read_manifest(&app_manifest_path(apps_dir, &app_id))?;
+	validate_manifest(&manifest)?;
+
+	let status = download_manifest_installer(&manifest, out_dir)?;
+	upsert_installed(&mut state, &app_id, &manifest, out_dir)?;
+	write_installed_state(state_file, &state)?;
+
+	match status {
+		DownloadStatus::UpToDate => println!("{app_id} is already up to date."),
+		DownloadStatus::Downloaded => println!("Updated {app_id}."),
+	}
+
+	Ok(())
+}
+
+fn update_all_apps(apps_dir: &Path, out_dir: &Path, state_file: &Path) -> Result<(), String> {
+	let mut state = read_installed_state(state_file)?;
+	if state.apps.is_empty() {
+		println!("No installed apps to update.");
+		return Ok(());
+	}
+
+	let app_ids: Vec<String> = state.apps.iter().map(|a| a.app_id.clone()).collect();
+	let mut failures = 0usize;
+
+	for app_id in app_ids {
+		let result = read_manifest(&app_manifest_path(apps_dir, &app_id))
+			.and_then(|m| {
+				validate_manifest(&m)?;
+				let status = download_manifest_installer(&m, out_dir)?;
+				upsert_installed(&mut state, &app_id, &m, out_dir)?;
+				Ok(status)
+			});
+
+		match result {
+			Ok(DownloadStatus::UpToDate) => println!("OK: {app_id} is already up to date."),
+			Ok(DownloadStatus::Downloaded) => println!("OK: Updated {app_id}."),
+			Err(err) => {
+				failures += 1;
+				println!("FAIL: {app_id} ({err})");
+			}
+		}
+	}
+
+	write_installed_state(state_file, &state)?;
+
+	if failures > 0 {
+		Err(format!("Update failed for {failures} app(s)"))
+	} else {
+		println!("All installed apps are up to date.");
+		Ok(())
+	}
+}
+
+fn remove_app(app: &str, state_file: &Path) -> Result<(), String> {
+	let app_id = normalize_app_id(app);
+	let mut state = read_installed_state(state_file)?;
+
+	let Some(index) = state.apps.iter().position(|a| a.app_id == app_id) else {
+		return Err(format!("{app_id} is not installed"));
+	};
+
+	let removed = state.apps.remove(index);
+	let removed_path = PathBuf::from(&removed.installed_file);
+	if removed_path.exists() {
+		fs::remove_file(&removed_path)
+			.map_err(|e| format!("Failed to remove {}: {e}", removed_path.display()))?;
+		println!("Removed file {}", removed_path.display());
+	} else {
+		println!("Installer file not found: {}", removed_path.display());
+	}
+
+	write_installed_state(state_file, &state)?;
+	println!("Removed {app_id} from installed list.");
+	Ok(())
+}
+
+fn download_manifest_installer(manifest: &AppManifest, out_dir: &Path) -> Result<DownloadStatus, String> {
 	fs::create_dir_all(out_dir)
 		.map_err(|e| format!("Failed to create {}: {e}", out_dir.display()))?;
 
@@ -165,29 +317,109 @@ fn install_app(apps_dir: &Path, app: &str, out_dir: &Path) -> Result<(), String>
 	let target_path = out_dir.join(file_name);
 	println!("Downloading {}...", manifest.download);
 
-	let client = Client::builder()
-		.user_agent("cpkg/0.1")
-		.build()
-		.map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+	let bytes = download_bytes(&manifest.download)?;
+	let is_unchanged = if target_path.exists() {
+		match fs::read(&target_path) {
+			Ok(existing) => existing == bytes,
+			Err(_) => false,
+		}
+	} else {
+		false
+	};
 
-	let response = client
-		.get(&manifest.download)
-		.send()
-		.map_err(|e| format!("Request failed: {e}"))?
-		.error_for_status()
-		.map_err(|e| format!("Download failed: {e}"))?;
-
-	let bytes = response
-		.bytes()
-		.map_err(|e| format!("Failed reading response bytes: {e}"))?;
+	if is_unchanged {
+		return Ok(DownloadStatus::UpToDate);
+	}
 
 	let mut file = fs::File::create(&target_path)
 		.map_err(|e| format!("Failed to write {}: {e}", target_path.display()))?;
 	file.write_all(&bytes)
 		.map_err(|e| format!("Failed writing {}: {e}", target_path.display()))?;
 
-	println!("Installed {app} -> {}", target_path.display());
+	println!("Saved installer to {}", target_path.display());
+	Ok(DownloadStatus::Downloaded)
+}
+
+fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+	let client = Client::builder()
+		.user_agent("cpkg/0.1")
+		.build()
+		.map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+	let response = client
+		.get(url)
+		.send()
+		.map_err(|e| format!("Request failed: {e}"))?
+		.error_for_status()
+		.map_err(|e| format!("Download failed: {e}"))?;
+
+	response
+		.bytes()
+		.map(|b| b.to_vec())
+		.map_err(|e| format!("Failed reading response bytes: {e}"))
+}
+
+fn upsert_installed(
+	state: &mut InstalledState,
+	app_id: &str,
+	manifest: &AppManifest,
+	out_dir: &Path,
+) -> Result<(), String> {
+	let file_name = file_name_from_download_url(&manifest.download)?;
+	let installed_path = out_dir.join(file_name);
+	let now = now_unix_seconds()?;
+
+	let record = InstalledApp {
+		app_id: app_id.to_string(),
+		name: manifest.name.clone(),
+		repo: manifest.repo.clone(),
+		description: manifest.description.clone(),
+		download: manifest.download.clone(),
+		installed_file: installed_path.to_string_lossy().to_string(),
+		installed_at_unix: now,
+	};
+
+	if let Some(existing) = state.apps.iter_mut().find(|a| a.app_id == app_id) {
+		*existing = record;
+	} else {
+		state.apps.push(record);
+		state.apps.sort_by(|a, b| a.app_id.cmp(&b.app_id));
+	}
+
 	Ok(())
+}
+
+fn read_installed_state(path: &Path) -> Result<InstalledState, String> {
+	if !path.exists() {
+		return Ok(InstalledState::default());
+	}
+
+	let raw = fs::read_to_string(path)
+		.map_err(|e| format!("Failed reading {}: {e}", path.display()))?;
+	serde_json::from_str(&raw)
+		.map_err(|e| format!("Invalid JSON in {}: {e}", path.display()))
+}
+
+fn write_installed_state(path: &Path, state: &InstalledState) -> Result<(), String> {
+	if let Some(parent) = path.parent() {
+		fs::create_dir_all(parent)
+			.map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+	}
+
+	let raw = serde_json::to_string_pretty(state)
+		.map_err(|e| format!("Failed to encode installed state: {e}"))?;
+	fs::write(path, raw).map_err(|e| format!("Failed writing {}: {e}", path.display()))
+}
+
+fn normalize_app_id(app: &str) -> String {
+	app.trim().trim_end_matches(".json").to_string()
+}
+
+fn now_unix_seconds() -> Result<u64, String> {
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.map_err(|e| format!("System time error: {e}"))
 }
 
 fn app_manifest_path(apps_dir: &Path, app: &str) -> PathBuf {
